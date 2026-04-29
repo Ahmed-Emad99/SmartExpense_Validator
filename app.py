@@ -1,325 +1,343 @@
 import streamlit as st
 import os
-from dotenv import load_dotenv
+import time
+from config import AzureConfig
 from blob_storage import BlobStorageService
 from doc_intelligence import DocumentIntelligenceService
+from doc_processor import DocumentProcessor
+from search_service import AzureSearchService
+from rag_service import RAGService
+from chat_service import ChatService
 
 
 # ============================================================================
-# UI COMPONENTS AND FUNCTIONS
+# CONFIGURATION AND INITIALIZATION
 # ============================================================================
+
+def initialize_services():
+    """Initialize all services"""
+    config = AzureConfig()
+    
+    # Initialize services
+    blob_service = BlobStorageService(config.storage_connection_string)
+    doc_service = DocumentIntelligenceService(
+        config.doc_intelligence_endpoint,
+        config.doc_intelligence_key
+    )
+    search_service = AzureSearchService(
+        config.search_endpoint,
+        config.search_key,
+        config.search_index_name
+    )
+    
+    # Create index if doesn't exist
+    try:
+        search_service.create_index()
+    except:
+        pass
+    
+    rag_service = RAGService(search_service)
+    
+    chat_service = ChatService(
+        rag_service,
+        azure_endpoint=config.azure_openai_endpoint,
+        azure_key=config.azure_openai_key,
+        api_version=config.azure_openai_api_version,
+        model=config.azure_openai_model
+    )
+    
+    processor = DocumentProcessor(chunk_size=2000, chunk_overlap=300)
+    
+    return {
+        "config": config,
+        "blob_service": blob_service,
+        "doc_service": doc_service,
+        "search_service": search_service,
+        "rag_service": rag_service,
+        "chat_service": chat_service,
+        "processor": processor
+    }
+
 
 def setup_page():
     """Configure page settings"""
-    st.set_page_config(page_title="PDF Upload to Azure Blob Storage", layout="centered")
-    st.title("📄 PDF Upload to Azure Blob Storage")
+    st.set_page_config(
+        page_title="PDF Chat with RAG",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+    st.title("💬 PDF Chat with RAG")
+    st.markdown("Upload PDFs and chat directly with their content using AI Search")
 
 
-def display_extracted_content(result):
-    """
-    Display extracted content in tabbed interface
+# ============================================================================
+# SESSION STATE MANAGEMENT
+# ============================================================================
+
+def initialize_session_state():
+    """Initialize Streamlit session state"""
+    if "services" not in st.session_state:
+        st.session_state.services = initialize_services()
     
-    Args:
-        result: AnalyzeResult object from Document Intelligence
-    """
-    doc_service = DocumentIntelligenceService("", "")
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
     
-    st.success("✅ PDF processed successfully!")
-    st.markdown("---")
-    st.subheader("📖 Extracted Content")
+    if "current_document" not in st.session_state:
+        st.session_state.current_document = None
     
-    if result.pages:
-        tab1, tab2 = st.tabs(["📄 Full Text", "📊 Details"])
+    if "indexed_documents" not in st.session_state:
+        st.session_state.indexed_documents = []
+
+
+# ============================================================================
+# UI COMPONENTS
+# ============================================================================
+
+def display_sidebar():
+    """Display sidebar with upload and document selection"""
+    with st.sidebar:
+        st.header("📁 Document Management")
         
-        with tab1:
-            full_text = doc_service.extract_text(result)
-            if full_text:
-                st.text_area(
-                    "Full Text Content:",
-                    value=full_text,
-                    height=400,
-                    disabled=False
+        # Upload section
+        st.subheader("Upload New PDF")
+        uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
+        folder_name = st.text_input("Folder name (optional)", value="documents")
+        
+        if uploaded_file and st.button("Upload & Index", use_container_width=True):
+            try:
+                # Stage 1: Upload to blob storage
+                st.info("📤 Stage 1/5: Uploading PDF to Azure Blob Storage...")
+                services = st.session_state.services
+                upload_info = services["blob_service"].upload_pdf(uploaded_file, folder_name)
+                st.success("✅ PDF uploaded")
+                
+                # Stage 2: Generate SAS URL
+                st.info("🔐 Stage 2/5: Generating access URL...")
+                sas_url = services["blob_service"].get_blob_sas_url(upload_info["blob_name"])
+                st.success("✅ Access URL generated")
+                
+                # Stage 3: Extract text with Document Intelligence
+                st.info("📖 Stage 3/5: Extracting text from PDF (this may take 10-30 seconds)...")
+                doc_result = services["doc_service"].analyze_document(sas_url)
+                pages_data = services["doc_service"].extract_text_by_page(doc_result)
+                total_chars = sum(len(p["text"]) for p in pages_data)
+                st.success(f"✅ Text extracted ({total_chars} characters across {len(pages_data)} pages)")
+                
+                # Stage 4: Process into chunks (page by page)
+                st.info("✂️ Stage 4/5: Processing document into chunks...")
+                st.write(f"📊 Document size: {total_chars:,} characters across {len(pages_data)} pages")
+                
+                chunk_start = time.time()
+                all_chunks = []
+                for page_info in pages_data:
+                    page_chunks = services["processor"].chunk_text(
+                        page_info["text"],
+                        uploaded_file.name,
+                        page_number=page_info["page_number"]
+                    )
+                    all_chunks.extend(page_chunks)
+                
+                chunk_time = time.time() - chunk_start
+                chunks = all_chunks
+                
+                st.write(f"✅ Created {len(chunks)} chunks in {chunk_time:.2f}s")
+                if chunk_time > 5:
+                    st.warning(f"⚠️ Chunking took {chunk_time:.2f}s - consider increasing chunk_size")
+                st.success("✅ Chunking complete")
+                
+                # Debug: Show chunk page distribution
+                with st.expander("📊 Chunk Distribution by Page"):
+                    page_chunks = {}
+                    for chunk in chunks:
+                        page = chunk.page_number
+                        page_chunks[page] = page_chunks.get(page, 0) + 1
+                    
+                    for page in sorted(page_chunks.keys()):
+                        st.write(f"Page {page}: {page_chunks[page]} chunks")
+                
+                # Stage 5: Index in Azure AI Search
+                index_start = time.time()
+                documents = services["processor"].prepare_for_indexing(chunks)
+                prep_time = time.time() - index_start
+                st.info(f"Prepared {len(documents)} documents in {prep_time:.2f}s")
+                
+                st.info(f"🔍 Stage 5/5: Indexing {len(documents)} chunks in Azure AI Search (this may take time)...")
+                index_time = time.time()
+                result = services["search_service"].index_documents(documents)
+                total_index_time = time.time() - index_time
+                st.success(f"✅ Indexing complete in {total_index_time:.2f}s")
+                
+                # Update indexed documents list
+                st.session_state.indexed_documents = services["search_service"].get_all_sources()
+                st.session_state.current_document = uploaded_file.name
+                
+                st.success(f"✅ Document indexed successfully! {result['successful']} chunks indexed.")
+                st.info(f"📊 Total chunks: {result['total_documents']}")
+                    
+            except Exception as e:
+                st.error(f"Error processing document: {str(e)}")
+        
+        st.markdown("---")
+        
+        # Document selection
+        st.subheader("📚 Select Document")
+        services = st.session_state.services
+        available_docs = services["search_service"].get_all_sources()
+        
+        if available_docs:
+            selected_doc = st.selectbox(
+                "Choose a document to chat with:",
+                available_docs,
+                index=0 if not st.session_state.current_document else (
+                    available_docs.index(st.session_state.current_document)
+                    if st.session_state.current_document in available_docs else 0
                 )
-            else:
-                st.info("No text content found in the PDF.")
+            )
+            st.session_state.current_document = selected_doc
+        else:
+            st.info("No documents indexed yet. Upload a PDF to get started!")
         
-        with tab2:
-            pages_count = doc_service.get_page_count(result)
-            st.write(f"**Total Pages:** {pages_count}")
+        st.markdown("---")
+        
+        # Chat settings
+        st.subheader("⚙️ Chat Settings")
+        top_k = st.slider("Number of context chunks to retrieve:", 1, 10, 5)
+        
+        st.markdown("---")
+        
+        # Clear chat history
+        if st.button("🔄 Clear Chat History", use_container_width=True):
+            st.session_state.chat_history = []
+            st.rerun()
+        
+        st.markdown("---")
+        
+        # Debug section
+        if st.checkbox("🔍 Debug: Inspect Azure Search"):
+            st.subheader("Azure Search Index Contents")
+            services = st.session_state.services
+            current_doc = st.session_state.current_document
             
-            for idx, page in enumerate(result.pages, 1):
-                with st.expander(f"Page {idx} Details"):
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.write(f"**Page Number:** {page.page_number}")
-                        st.write(f"**Height:** {page.height}")
-                    with col2:
-                        st.write(f"**Width:** {page.width}")
+            if current_doc:
+                try:
+                    # Search for all chunks from current document
+                    results = services["search_service"].search_client.search(
+                        search_text="*",
+                        filter=f"source_file eq '{current_doc}'",
+                        top=100,
+                        select=["id", "page_number", "source_file", "chunk_index"]
+                    )
                     
-                    if page.lines:
-                        st.write(f"**Number of Lines:** {len(page.lines)}")
-                        st.markdown("**Extracted Lines:**")
-                        lines_text = "\n".join([f"{i}. {line.content}" for i, line in enumerate(page.lines, 1)])
-                        st.text(lines_text)
+                    chunks_info = []
+                    for result in results:
+                        chunks_info.append({
+                            "id": result["id"],
+                            "page_number": result.get("page_number", "N/A"),
+                            "chunk_index": result.get("chunk_index", "N/A")
+                        })
                     
-                    # Check if tables attribute exists
-                    if hasattr(page, 'tables') and page.tables:
-                        st.write(f"**Number of Tables:** {len(page.tables)}")
-                        for table_idx, table in enumerate(page.tables, 1):
-                            st.write(f"**Table {table_idx}:**")
-                            st.write(f"Rows: {table.row_count}, Columns: {table.column_count}")
-    else:
-        st.warning("⚠️ No pages found in the PDF.")
+                    if chunks_info:
+                        st.write(f"Found {len(chunks_info)} chunks:")
+                        for chunk in chunks_info:
+                            st.write(f"  • {chunk['id']} - Page {chunk['page_number']}, Chunk {chunk['chunk_index']}")
+                    else:
+                        st.write("No chunks found in index")
+                        
+                except Exception as e:
+                    st.error(f"Error reading index: {str(e)}")
 
 
-def display_upload_success(upload_info: dict):
-    """
-    Display upload success messages
+def display_chat_interface():
+    """Display main chat interface"""
+    # Display chat history
+    for message in st.session_state.chat_history:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
     
-    Args:
-        upload_info: Dictionary containing upload information
-    """
-    st.success("✅ PDF uploaded successfully!")
-    st.success(f"📁 Folder: {upload_info['folder_path']}")
-    st.success(f"📄 File: {upload_info['file_name']}")
-    st.info(f"📍 Blob path: {upload_info['blob_name']}")
+    # Chat input
+    if prompt := st.chat_input("Ask a question about the document..."):
+        # Add user message to history
+        st.session_state.chat_history.append({
+            "role": "user",
+            "content": prompt
+        })
+        
+        # Display user message
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        
+        # Generate response
+        with st.chat_message("assistant"):
+            try:
+                services = st.session_state.services
+                
+                # Get current document selection
+                current_doc = st.session_state.current_document
+                
+                # Get RAG response
+                response = services["chat_service"].chat_with_rag(
+                    user_query=prompt,
+                    chat_history=st.session_state.chat_history[:-1],
+                    source_file=current_doc,
+                    top_k=5
+                )
+                
+                # Display answer
+                st.markdown(response["answer"])
+                
+                # Display sources in expander
+                with st.expander("📚 View Sources"):
+                    sources_text = services["chat_service"].format_sources_for_display(
+                        response["sources"]
+                    )
+                    st.markdown(sources_text)
+                    
+                    st.markdown("**Tokens Used:**")
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric("Prompt", response["tokens_used"]["prompt"])
+                    col2.metric("Completion", response["tokens_used"]["completion"])
+                    col3.metric("Total", response["tokens_used"]["total"])
+                
+                # Add assistant response to history
+                st.session_state.chat_history.append({
+                    "role": "assistant",
+                    "content": response["answer"]
+                })
+                
+            except Exception as e:
+                st.error(f"Error generating response: {str(e)}")
 
 
 def display_azure_configuration():
     """
-    Display Azure configuration sidebar
+    Display Azure configuration status in sidebar
     
     Returns:
-        tuple: (connection_string, doc_intelligence_endpoint, doc_intelligence_key)
+        AzureConfig: Configuration object
     """
-    load_dotenv()
+    config = st.session_state.services["config"]
     
-    connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
-    doc_intelligence_endpoint = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT")
-    doc_intelligence_key = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_KEY")
-    
-    st.sidebar.header("Azure Configuration")
-    
-    # Blob Storage Configuration
-    if connection_string:
-        st.sidebar.success("✅ Blob Storage connection string loaded")
-    else:
-        st.sidebar.warning("⚠️ Blob Storage connection string not found")
-        connection_string = st.sidebar.text_input(
-            "Azure Storage Connection String",
-            type="password",
-            help="Leave empty to use .env file, or enter connection string here"
-        )
-    
-    st.sidebar.markdown("---")
-    
-    # Document Intelligence Configuration
-    if doc_intelligence_endpoint and doc_intelligence_key:
-        st.sidebar.success("✅ Document Intelligence credentials loaded")
-    else:
-        st.sidebar.warning("⚠️ Document Intelligence credentials not found")
-        doc_intelligence_endpoint = st.sidebar.text_input(
-            "Document Intelligence Endpoint",
-            placeholder="https://<region>.api.cognitive.microsoft.com/",
-            help="Leave empty to use .env file"
-        )
-        doc_intelligence_key = st.sidebar.text_input(
-            "Document Intelligence Key",
-            type="password",
-            help="Leave empty to use .env file"
-        )
-    
-    return connection_string, doc_intelligence_endpoint, doc_intelligence_key
-
-
-def display_instructions():
-    """Display application instructions and notes"""
-    st.markdown("---")
-    st.markdown("""
-    ### 📋 Instructions:
-    1. **Azure Blob Storage Setup**:
-       - Go to Azure Portal → Storage Account → Access Keys → Copy Connection String
-       - Store in `.env` file as `AZURE_STORAGE_CONNECTION_STRING`
-
-    2. **Document Intelligence Setup**:
-       - Create a Document Intelligence resource in Azure Portal
-       - Copy the Endpoint and Key
-       - Store in `.env` file as:
-         - `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT`
-         - `AZURE_DOCUMENT_INTELLIGENCE_KEY`
-
-    3. **Upload and Process**:
-       - Enter a folder name
-       - Toggle "Single File" checkbox to switch between single and batch mode
-       - Select your PDF file(s) - up to 5 files in batch mode
-       - Click Upload PDF/PDFs
-
-    ### 💡 Features:
-    - 📤 Upload PDF to Azure Blob Storage
-    - 📦 Batch upload support (up to 5 files)
-    - 🔍 Process PDF with Azure Document Intelligence
-    - 📖 Extract and display full text content
-    - 📊 View detailed page information and tables
-
-    ### 📝 Notes:
-    - Folders are created as blob path prefixes
-    - Document Intelligence extracts text, tables, and other content
-    - Supports multi-page PDFs
-    - Maximum 5 files per batch upload
-    """)
-
-
-def get_upload_inputs():
-    """
-    Get upload inputs from user with batch upload support
-    
-    Returns:
-        tuple: (folder_name, pdf_files)
-    """
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        folder_name = st.text_input(
-            "Enter Folder Name",
-            placeholder="e.g., my-documents",
-            help="The name of the folder to create in Azure Blob Storage"
-        )
-    
-    with col2:
-        st.write("")
-        st.write("")
-        single_mode = st.checkbox("Single File", value=True, help="Toggle to batch mode for multiple files")
-    
-    if single_mode:
-        pdf_file = st.file_uploader(
-            "Upload PDF File",
-            type="pdf",
-            help="Select a PDF file to upload"
-        )
-        pdf_files = [pdf_file] if pdf_file else []
-    else:
-        pdf_files = st.file_uploader(
-            "Upload PDF Files (up to 5 files)",
-            type="pdf",
-            accept_multiple_files=True,
-            help="Select multiple PDF files (maximum 5 files)"
-        )
-        if pdf_files and len(pdf_files) > 0:
-            st.info(f"📁 {len(pdf_files)} file(s) selected")
-    
-    return folder_name, pdf_files
-
-
-def render_upload_button(file_count=1):
-    """
-    Render upload button
-    
-    Args:
-        file_count: Number of files to be uploaded
-        
-    Returns:
-        bool: True if button is clicked
-    """
-    button_text = "📤 Upload PDFs" if file_count > 1 else "📤 Upload PDF"
-    return st.button(button_text, use_container_width=True)
-
-
-def show_validation_errors(connection_string, folder_name, pdf_files, doc_intelligence_endpoint, doc_intelligence_key):
-    """
-    Show validation errors
-    
-    Args:
-        connection_string: Azure Storage connection string
-        folder_name: Folder name input
-        pdf_files: List of PDF files uploaded
-        doc_intelligence_endpoint: Document Intelligence endpoint
-        doc_intelligence_key: Document Intelligence API key
-        
-    Returns:
-        bool: True if there are errors, False if validation passes
-    """
-    if not connection_string:
-        st.error("❌ Please provide Azure Storage connection string")
-        return True
-    elif not folder_name:
-        st.error("❌ Please enter a folder name")
-        return True
-    elif not pdf_files or len(pdf_files) == 0:
-        st.error("❌ Please select at least one PDF file")
-        return True
-    elif len(pdf_files) > 5:
-        st.error("❌ Maximum 5 files allowed per batch")
-        return True
-    elif not doc_intelligence_endpoint or not doc_intelligence_key:
-        st.error("❌ Please provide Document Intelligence credentials")
-        return True
-    return False
-
-
-def show_processing_spinner(message):
-    """
-    Show processing spinner
-    
-    Args:
-        message: Spinner message
-        
-    Returns:
-        Context manager for spinner
-    """
-    return st.spinner(message)
+    return config
 
 
 # ============================================================================
 # MAIN APPLICATION
 # ============================================================================
 
-# Setup page
-setup_page()
+def main():
+    """Main application entry point"""
+    # Setup page
+    setup_page()
+    
+    # Initialize session state
+    initialize_session_state()
+    
+    # Display sidebar
+    display_sidebar()
+    
+    # Display chat interface
+    display_chat_interface()
 
-# Display Azure configuration sidebar
-connection_string, doc_intelligence_endpoint, doc_intelligence_key = display_azure_configuration()
 
-# Get upload inputs
-folder_name, pdf_files = get_upload_inputs()
-
-# Render upload button
-if render_upload_button(len(pdf_files) if pdf_files else 1):
-    # Validate inputs
-    if show_validation_errors(connection_string, folder_name, pdf_files, doc_intelligence_endpoint, doc_intelligence_key):
-        pass
-    else:
-        try:
-            blob_service = BlobStorageService(connection_string)
-            doc_service = DocumentIntelligenceService(
-                doc_intelligence_endpoint,
-                doc_intelligence_key
-            )
-            
-            # Process each PDF file
-            for idx, pdf_file in enumerate(pdf_files, 1):
-                st.write(f"Processing file {idx}/{len(pdf_files)}: {pdf_file.name}")
-                
-                try:
-                    # Upload to Blob Storage
-                    with show_processing_spinner(f"⏳ Uploading {pdf_file.name}..."):
-                        upload_info = blob_service.upload_pdf(pdf_file, folder_name)
-                        display_upload_success(upload_info)
-                    
-                    # Process with Document Intelligence
-                    with show_processing_spinner(f"⏳ Processing {pdf_file.name} with Document Intelligence..."):
-                        sas_url = blob_service.get_blob_sas_url(upload_info["blob_name"])
-                        result = doc_service.analyze_document(sas_url)
-                        display_extracted_content(result)
-                    
-                    st.markdown("---")
-                    
-                except Exception as e:
-                    st.error(f"❌ Error processing {pdf_file.name}: {str(e)}")
-                    st.markdown("---")
-                    
-        except Exception as e:
-            st.error(f"❌ Error: {str(e)}")
-            st.error(f"Details: {type(e).__name__}")
-
-# Display instructions
-display_instructions()
+if __name__ == "__main__":
+    main()

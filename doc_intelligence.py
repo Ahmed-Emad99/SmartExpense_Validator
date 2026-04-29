@@ -64,6 +64,32 @@ class DocumentIntelligenceService:
                         full_text += line.content + "\n"
         return full_text
     
+    def extract_text_by_page(self, result) -> list:
+        """
+        Extract text by page with page numbers
+        
+        Args:
+            result: AnalyzeResult object from analyze_document
+            
+        Returns:
+            list: List of dicts with 'page_number' and 'text' keys
+        """
+        pages_data = []
+        if result.pages:
+            for page in result.pages:
+                page_text = ""
+                if page.lines:
+                    for line in page.lines:
+                        page_text += line.content + "\n"
+                
+                if page_text.strip():  # Only add if page has content
+                    pages_data.append({
+                        "page_number": page.page_number,
+                        "text": page_text
+                    })
+        
+        return pages_data
+    
     def get_page_count(self, result) -> int:
         """
         Get total number of pages
