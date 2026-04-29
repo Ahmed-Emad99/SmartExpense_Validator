@@ -31,7 +31,7 @@ class AzureConfig:
         self.azure_openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
         self.azure_openai_key = os.getenv("AZURE_OPENAI_KEY")
         self.azure_openai_api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
-        self.azure_openai_model = os.getenv("AZURE_OPENAI_MODEL", "gpt-4o")
+        self.azure_openai_model = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
         
         self._validate_config()
     
