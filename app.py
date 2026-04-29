@@ -38,7 +38,7 @@ def display_extracted_content(result):
                     "Full Text Content:",
                     value=full_text,
                     height=400,
-                    disabled=True
+                    disabled=False
                 )
             else:
                 st.info("No text content found in the PDF.")
@@ -150,11 +150,13 @@ def display_instructions():
 
     3. **Upload and Process**:
        - Enter a folder name
-       - Select your PDF file
-       - Click Upload PDF
+       - Toggle "Single File" checkbox to switch between single and batch mode
+       - Select your PDF file(s) - up to 5 files in batch mode
+       - Click Upload PDF/PDFs
 
     ### 💡 Features:
     - 📤 Upload PDF to Azure Blob Storage
+    - 📦 Batch upload support (up to 5 files)
     - 🔍 Process PDF with Azure Document Intelligence
     - 📖 Extract and display full text content
     - 📊 View detailed page information and tables
@@ -163,15 +165,16 @@ def display_instructions():
     - Folders are created as blob path prefixes
     - Document Intelligence extracts text, tables, and other content
     - Supports multi-page PDFs
+    - Maximum 5 files per batch upload
     """)
 
 
 def get_upload_inputs():
     """
-    Get upload inputs from user
+    Get upload inputs from user with batch upload support
     
     Returns:
-        tuple: (folder_name, pdf_file)
+        tuple: (folder_name, pdf_files)
     """
     col1, col2 = st.columns(2)
     
@@ -183,33 +186,52 @@ def get_upload_inputs():
         )
     
     with col2:
+        st.write("")
+        st.write("")
+        single_mode = st.checkbox("Single File", value=True, help="Toggle to batch mode for multiple files")
+    
+    if single_mode:
         pdf_file = st.file_uploader(
             "Upload PDF File",
             type="pdf",
             help="Select a PDF file to upload"
         )
+        pdf_files = [pdf_file] if pdf_file else []
+    else:
+        pdf_files = st.file_uploader(
+            "Upload PDF Files (up to 5 files)",
+            type="pdf",
+            accept_multiple_files=True,
+            help="Select multiple PDF files (maximum 5 files)"
+        )
+        if pdf_files and len(pdf_files) > 0:
+            st.info(f"📁 {len(pdf_files)} file(s) selected")
     
-    return folder_name, pdf_file
+    return folder_name, pdf_files
 
 
-def render_upload_button():
+def render_upload_button(file_count=1):
     """
     Render upload button
     
+    Args:
+        file_count: Number of files to be uploaded
+        
     Returns:
         bool: True if button is clicked
     """
-    return st.button("📤 Upload PDF", use_container_width=True)
+    button_text = "📤 Upload PDFs" if file_count > 1 else "📤 Upload PDF"
+    return st.button(button_text, use_container_width=True)
 
 
-def show_validation_errors(connection_string, folder_name, pdf_file, doc_intelligence_endpoint, doc_intelligence_key):
+def show_validation_errors(connection_string, folder_name, pdf_files, doc_intelligence_endpoint, doc_intelligence_key):
     """
     Show validation errors
     
     Args:
         connection_string: Azure Storage connection string
         folder_name: Folder name input
-        pdf_file: PDF file uploaded
+        pdf_files: List of PDF files uploaded
         doc_intelligence_endpoint: Document Intelligence endpoint
         doc_intelligence_key: Document Intelligence API key
         
@@ -222,8 +244,11 @@ def show_validation_errors(connection_string, folder_name, pdf_file, doc_intelli
     elif not folder_name:
         st.error("❌ Please enter a folder name")
         return True
-    elif not pdf_file:
-        st.error("❌ Please select a PDF file")
+    elif not pdf_files or len(pdf_files) == 0:
+        st.error("❌ Please select at least one PDF file")
+        return True
+    elif len(pdf_files) > 5:
+        st.error("❌ Maximum 5 files allowed per batch")
         return True
     elif not doc_intelligence_endpoint or not doc_intelligence_key:
         st.error("❌ Please provide Document Intelligence credentials")
@@ -255,33 +280,43 @@ setup_page()
 connection_string, doc_intelligence_endpoint, doc_intelligence_key = display_azure_configuration()
 
 # Get upload inputs
-folder_name, pdf_file = get_upload_inputs()
+folder_name, pdf_files = get_upload_inputs()
 
 # Render upload button
-if render_upload_button():
+if render_upload_button(len(pdf_files) if pdf_files else 1):
     # Validate inputs
-    if show_validation_errors(connection_string, folder_name, pdf_file, doc_intelligence_endpoint, doc_intelligence_key):
+    if show_validation_errors(connection_string, folder_name, pdf_files, doc_intelligence_endpoint, doc_intelligence_key):
         pass
     else:
         try:
-            # Upload to Blob Storage
-            with show_processing_spinner("⏳ Uploading to Azure Blob Storage..."):
-                blob_service = BlobStorageService(connection_string)
-                upload_info = blob_service.upload_pdf(pdf_file, folder_name)
-                display_upload_success(upload_info)
+            blob_service = BlobStorageService(connection_string)
+            doc_service = DocumentIntelligenceService(
+                doc_intelligence_endpoint,
+                doc_intelligence_key
+            )
             
-            # Process with Document Intelligence
-            with show_processing_spinner("⏳ Processing PDF with Document Intelligence..."):
-                # Generate SAS URL for Document Intelligence to access the blob
-                sas_url = blob_service.get_blob_sas_url(upload_info["blob_name"])
+            # Process each PDF file
+            for idx, pdf_file in enumerate(pdf_files, 1):
+                st.write(f"Processing file {idx}/{len(pdf_files)}: {pdf_file.name}")
                 
-                doc_service = DocumentIntelligenceService(
-                    doc_intelligence_endpoint,
-                    doc_intelligence_key
-                )
-                result = doc_service.analyze_document(sas_url)
-                display_extracted_content(result)
-                
+                try:
+                    # Upload to Blob Storage
+                    with show_processing_spinner(f"⏳ Uploading {pdf_file.name}..."):
+                        upload_info = blob_service.upload_pdf(pdf_file, folder_name)
+                        display_upload_success(upload_info)
+                    
+                    # Process with Document Intelligence
+                    with show_processing_spinner(f"⏳ Processing {pdf_file.name} with Document Intelligence..."):
+                        sas_url = blob_service.get_blob_sas_url(upload_info["blob_name"])
+                        result = doc_service.analyze_document(sas_url)
+                        display_extracted_content(result)
+                    
+                    st.markdown("---")
+                    
+                except Exception as e:
+                    st.error(f"❌ Error processing {pdf_file.name}: {str(e)}")
+                    st.markdown("---")
+                    
         except Exception as e:
             st.error(f"❌ Error: {str(e)}")
             st.error(f"Details: {type(e).__name__}")
