@@ -1,92 +1,290 @@
 import streamlit as st
 import os
 from dotenv import load_dotenv
-from blob_storage import upload_pdf_to_blob
+from blob_storage import BlobStorageService
+from doc_intelligence import DocumentIntelligenceService
 
-# Load environment variables from .env file
-load_dotenv()
 
-# Page configuration
-st.set_page_config(page_title="PDF Upload to Azure Blob Storage", layout="centered")
-st.title("📄 PDF Upload to Azure Blob Storage")
+# ============================================================================
+# UI COMPONENTS AND FUNCTIONS
+# ============================================================================
 
-# Load connection string from .env file
-connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+def setup_page():
+    """Configure page settings"""
+    st.set_page_config(page_title="PDF Upload to Azure Blob Storage", layout="centered")
+    st.title("📄 PDF Upload to Azure Blob Storage")
 
-# Sidebar for Azure credentials
-st.sidebar.header("Azure Configuration")
-if connection_string:
-    st.sidebar.success("✅ Connection string loaded from .env file")
-else:
-    st.sidebar.warning("⚠️ Connection string not found in .env file")
-    connection_string = st.sidebar.text_input(
-        "Azure Storage Connection String (Optional Override)",
-        type="password",
-        help="Leave empty to use .env file, or enter connection string here"
-    )
 
-# Main content
-col1, col2 = st.columns(2)
+def display_extracted_content(result):
+    """
+    Display extracted content in tabbed interface
+    
+    Args:
+        result: AnalyzeResult object from Document Intelligence
+    """
+    doc_service = DocumentIntelligenceService("", "")
+    
+    st.success("✅ PDF processed successfully!")
+    st.markdown("---")
+    st.subheader("📖 Extracted Content")
+    
+    if result.pages:
+        tab1, tab2 = st.tabs(["📄 Full Text", "📊 Details"])
+        
+        with tab1:
+            full_text = doc_service.extract_text(result)
+            if full_text:
+                st.text_area(
+                    "Full Text Content:",
+                    value=full_text,
+                    height=400,
+                    disabled=True
+                )
+            else:
+                st.info("No text content found in the PDF.")
+        
+        with tab2:
+            pages_count = doc_service.get_page_count(result)
+            st.write(f"**Total Pages:** {pages_count}")
+            
+            for idx, page in enumerate(result.pages, 1):
+                with st.expander(f"Page {idx} Details"):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.write(f"**Page Number:** {page.page_number}")
+                        st.write(f"**Height:** {page.height}")
+                    with col2:
+                        st.write(f"**Width:** {page.width}")
+                    
+                    if page.lines:
+                        st.write(f"**Number of Lines:** {len(page.lines)}")
+                        st.markdown("**Extracted Lines:**")
+                        lines_text = "\n".join([f"{i}. {line.content}" for i, line in enumerate(page.lines, 1)])
+                        st.text(lines_text)
+                    
+                    # Check if tables attribute exists
+                    if hasattr(page, 'tables') and page.tables:
+                        st.write(f"**Number of Tables:** {len(page.tables)}")
+                        for table_idx, table in enumerate(page.tables, 1):
+                            st.write(f"**Table {table_idx}:**")
+                            st.write(f"Rows: {table.row_count}, Columns: {table.column_count}")
+    else:
+        st.warning("⚠️ No pages found in the PDF.")
 
-with col1:
-    folder_name = st.text_input(
-        "Enter Folder Name",
-        placeholder="e.g., my-documents",
-        help="The name of the folder to create in Azure Blob Storage"
-    )
 
-with col2:
-    pdf_file = st.file_uploader(
-        "Upload PDF File",
-        type="pdf",
-        help="Select a PDF file to upload"
-    )
+def display_upload_success(upload_info: dict):
+    """
+    Display upload success messages
+    
+    Args:
+        upload_info: Dictionary containing upload information
+    """
+    st.success("✅ PDF uploaded successfully!")
+    st.success(f"📁 Folder: {upload_info['folder_path']}")
+    st.success(f"📄 File: {upload_info['file_name']}")
+    st.info(f"📍 Blob path: {upload_info['blob_name']}")
 
-# Upload button
-if st.button("📤 Upload PDF", use_container_width=True):
-    # Validation
+
+def display_azure_configuration():
+    """
+    Display Azure configuration sidebar
+    
+    Returns:
+        tuple: (connection_string, doc_intelligence_endpoint, doc_intelligence_key)
+    """
+    load_dotenv()
+    
+    connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+    doc_intelligence_endpoint = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT")
+    doc_intelligence_key = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_KEY")
+    
+    st.sidebar.header("Azure Configuration")
+    
+    # Blob Storage Configuration
+    if connection_string:
+        st.sidebar.success("✅ Blob Storage connection string loaded")
+    else:
+        st.sidebar.warning("⚠️ Blob Storage connection string not found")
+        connection_string = st.sidebar.text_input(
+            "Azure Storage Connection String",
+            type="password",
+            help="Leave empty to use .env file, or enter connection string here"
+        )
+    
+    st.sidebar.markdown("---")
+    
+    # Document Intelligence Configuration
+    if doc_intelligence_endpoint and doc_intelligence_key:
+        st.sidebar.success("✅ Document Intelligence credentials loaded")
+    else:
+        st.sidebar.warning("⚠️ Document Intelligence credentials not found")
+        doc_intelligence_endpoint = st.sidebar.text_input(
+            "Document Intelligence Endpoint",
+            placeholder="https://<region>.api.cognitive.microsoft.com/",
+            help="Leave empty to use .env file"
+        )
+        doc_intelligence_key = st.sidebar.text_input(
+            "Document Intelligence Key",
+            type="password",
+            help="Leave empty to use .env file"
+        )
+    
+    return connection_string, doc_intelligence_endpoint, doc_intelligence_key
+
+
+def display_instructions():
+    """Display application instructions and notes"""
+    st.markdown("---")
+    st.markdown("""
+    ### 📋 Instructions:
+    1. **Azure Blob Storage Setup**:
+       - Go to Azure Portal → Storage Account → Access Keys → Copy Connection String
+       - Store in `.env` file as `AZURE_STORAGE_CONNECTION_STRING`
+
+    2. **Document Intelligence Setup**:
+       - Create a Document Intelligence resource in Azure Portal
+       - Copy the Endpoint and Key
+       - Store in `.env` file as:
+         - `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT`
+         - `AZURE_DOCUMENT_INTELLIGENCE_KEY`
+
+    3. **Upload and Process**:
+       - Enter a folder name
+       - Select your PDF file
+       - Click Upload PDF
+
+    ### 💡 Features:
+    - 📤 Upload PDF to Azure Blob Storage
+    - 🔍 Process PDF with Azure Document Intelligence
+    - 📖 Extract and display full text content
+    - 📊 View detailed page information and tables
+
+    ### 📝 Notes:
+    - Folders are created as blob path prefixes
+    - Document Intelligence extracts text, tables, and other content
+    - Supports multi-page PDFs
+    """)
+
+
+def get_upload_inputs():
+    """
+    Get upload inputs from user
+    
+    Returns:
+        tuple: (folder_name, pdf_file)
+    """
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        folder_name = st.text_input(
+            "Enter Folder Name",
+            placeholder="e.g., my-documents",
+            help="The name of the folder to create in Azure Blob Storage"
+        )
+    
+    with col2:
+        pdf_file = st.file_uploader(
+            "Upload PDF File",
+            type="pdf",
+            help="Select a PDF file to upload"
+        )
+    
+    return folder_name, pdf_file
+
+
+def render_upload_button():
+    """
+    Render upload button
+    
+    Returns:
+        bool: True if button is clicked
+    """
+    return st.button("📤 Upload PDF", use_container_width=True)
+
+
+def show_validation_errors(connection_string, folder_name, pdf_file, doc_intelligence_endpoint, doc_intelligence_key):
+    """
+    Show validation errors
+    
+    Args:
+        connection_string: Azure Storage connection string
+        folder_name: Folder name input
+        pdf_file: PDF file uploaded
+        doc_intelligence_endpoint: Document Intelligence endpoint
+        doc_intelligence_key: Document Intelligence API key
+        
+    Returns:
+        bool: True if there are errors, False if validation passes
+    """
     if not connection_string:
         st.error("❌ Please provide Azure Storage connection string")
+        return True
     elif not folder_name:
         st.error("❌ Please enter a folder name")
+        return True
     elif not pdf_file:
         st.error("❌ Please select a PDF file")
+        return True
+    elif not doc_intelligence_endpoint or not doc_intelligence_key:
+        st.error("❌ Please provide Document Intelligence credentials")
+        return True
+    return False
+
+
+def show_processing_spinner(message):
+    """
+    Show processing spinner
+    
+    Args:
+        message: Spinner message
+        
+    Returns:
+        Context manager for spinner
+    """
+    return st.spinner(message)
+
+
+# ============================================================================
+# MAIN APPLICATION
+# ============================================================================
+
+# Setup page
+setup_page()
+
+# Display Azure configuration sidebar
+connection_string, doc_intelligence_endpoint, doc_intelligence_key = display_azure_configuration()
+
+# Get upload inputs
+folder_name, pdf_file = get_upload_inputs()
+
+# Render upload button
+if render_upload_button():
+    # Validate inputs
+    if show_validation_errors(connection_string, folder_name, pdf_file, doc_intelligence_endpoint, doc_intelligence_key):
+        pass
     else:
         try:
-            with st.spinner("⏳ Uploading to Azure Blob Storage..."):
-                # Upload PDF using blob storage manager
-                success, result = upload_pdf_to_blob(
-                    connection_string,
-                    folder_name,
-                    pdf_file
-                )
+            # Upload to Blob Storage
+            with show_processing_spinner("⏳ Uploading to Azure Blob Storage..."):
+                blob_service = BlobStorageService(connection_string)
+                upload_info = blob_service.upload_pdf(pdf_file, folder_name)
+                display_upload_success(upload_info)
+            
+            # Process with Document Intelligence
+            with show_processing_spinner("⏳ Processing PDF with Document Intelligence..."):
+                # Generate SAS URL for Document Intelligence to access the blob
+                sas_url = blob_service.get_blob_sas_url(upload_info["blob_name"])
                 
-                if success:
-                    # Success messages
-                    st.success(f"✅ PDF uploaded successfully!")
-                    st.success(f"📁 Folder: {result['folder_path']}")
-                    st.success(f"📄 File: {result['file_name']}")
-                    st.info(f"📍 Blob path: {result['blob_name']}")
-                    
-                    if result['container_created']:
-                        st.info(f"✅ Created container: {result['container_name']}")
-                else:
-                    st.error(f"❌ Error uploading file: {result['error']}")
-                    
+                doc_service = DocumentIntelligenceService(
+                    doc_intelligence_endpoint,
+                    doc_intelligence_key
+                )
+                result = doc_service.analyze_document(sas_url)
+                display_extracted_content(result)
+                
         except Exception as e:
-            st.error(f"❌ Error uploading file: {str(e)}")
+            st.error(f"❌ Error: {str(e)}")
+            st.error(f"Details: {type(e).__name__}")
 
-# Footer with instructions
-st.markdown("---")
-st.markdown("""
-### 📋 Instructions:
-1. **Get Connection String**: Go to Azure Portal → Storage Account → Access Keys → Copy Connection String
-2. **Paste Connection String**: Enter it in the sidebar on the left
-3. **Enter Folder Name**: Provide a name for the folder (will be created if it doesn't exist)
-4. **Upload PDF**: Select your PDF file and click Upload PDF
-
-### 💡 Notes:
-- Folders are created as blob path prefixes
-- Files are organized in the `uploads` container
-- Connection string is not saved and only used during upload
-""")
+# Display instructions
+display_instructions()

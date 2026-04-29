@@ -1,165 +1,138 @@
 """
-Azure Blob Storage Handler
-Handles all operations related to Azure Blob Storage
+Azure Blob Storage Service Module
+Handles all blob storage operations
 """
 
-from azure.storage.blob import BlobServiceClient
-from typing import Tuple
+from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions
+from datetime import datetime, timedelta
 
 
-class BlobStorageManager:
-    """Manages Azure Blob Storage operations"""
+class BlobStorageService:
+    """Service for managing Azure Blob Storage operations"""
     
-    def __init__(self, connection_string: str, container_name: str = "uploads"):
+    def __init__(self, connection_string: str):
         """
-        Initialize BlobStorageManager
+        Initialize Blob Storage Service
         
         Args:
             connection_string: Azure Storage connection string
-            container_name: Name of the container to use (default: 'uploads')
         """
         self.connection_string = connection_string
-        self.container_name = container_name
-        self.blob_service_client = BlobServiceClient.from_connection_string(
-            connection_string
-        )
+        self.blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+        self.container_name = "uploads"
     
-    def create_container_if_not_exists(self) -> bool:
+    def ensure_container_exists(self) -> bool:
         """
-        Create container if it doesn't exist
+        Check if container exists, create if it doesn't
         
         Returns:
-            bool: True if container was created, False if it already existed
+            bool: True if container exists or was created, False otherwise
         """
-        container_client = self.blob_service_client.get_container_client(
-            self.container_name
-        )
-        
         try:
+            container_client = self.blob_service_client.get_container_client(self.container_name)
             container_client.get_container_properties()
-            return False  # Container already exists
+            return True
         except:
-            self.blob_service_client.create_container(self.container_name)
-            return True  # Container was created
+            try:
+                self.blob_service_client.create_container(self.container_name)
+                return True
+            except Exception as e:
+                raise Exception(f"Failed to create container: {str(e)}")
     
-    def sanitize_folder_name(self, folder_name: str) -> str:
+    def upload_pdf(self, pdf_file, folder_name: str) -> dict:
         """
-        Sanitize folder name for Azure Blob Storage
+        Upload PDF file to blob storage
         
         Args:
-            folder_name: Original folder name
+            pdf_file: File object from streamlit file_uploader
+            folder_name: Folder name in blob storage
             
         Returns:
-            str: Sanitized folder name
+            dict: Contains blob_name, blob_url, folder_path, and file_name
         """
-        return folder_name.strip().replace(" ", "-").lower()
+        try:
+            # Ensure container exists
+            self.ensure_container_exists()
+            
+            # Create folder path (blob path with folder prefix)
+            folder_path = folder_name.strip().replace(" ", "-").lower()
+            blob_name = f"{folder_path}/{pdf_file.name}"
+            
+            # Get blob client and upload
+            blob_client = self.blob_service_client.get_blob_client(
+                container=self.container_name,
+                blob=blob_name
+            )
+            blob_client.upload_blob(pdf_file.getvalue(), overwrite=True)
+            
+            return {
+                "blob_name": blob_name,
+                "blob_url": blob_client.url,
+                "folder_path": folder_path,
+                "file_name": pdf_file.name,
+                "container_name": self.container_name
+            }
+        except Exception as e:
+            raise Exception(f"Failed to upload PDF: {str(e)}")
     
-    def upload_pdf(self, folder_name: str, pdf_file) -> Tuple[bool, str, str]:
+    def get_blob_url(self, blob_name: str) -> str:
         """
-        Upload PDF file to Azure Blob Storage in a folder
+        Get URL of a blob
         
         Args:
-            folder_name: Name of the folder to create/use
-            pdf_file: PDF file object from Streamlit file uploader
+            blob_name: Name of the blob
             
         Returns:
-            Tuple: (success: bool, folder_path: str, blob_name: str)
-            
-        Raises:
-            Exception: If upload fails
-        """
-        # Sanitize folder name
-        folder_path = self.sanitize_folder_name(folder_name)
-        
-        # Create blob name with folder structure
-        blob_name = f"{folder_path}/{pdf_file.name}"
-        
-        # Get blob client
-        blob_client = self.blob_service_client.get_blob_client(
-            container=self.container_name,
-            blob=blob_name
-        )
-        
-        # Upload the file
-        blob_client.upload_blob(pdf_file.getvalue(), overwrite=True)
-        
-        return True, folder_path, blob_name
-    
-    def list_blobs_in_folder(self, folder_path: str) -> list:
-        """
-        List all blobs in a specific folder
-        
-        Args:
-            folder_path: Folder path to list
-            
-        Returns:
-            list: List of blob names in the folder
-        """
-        container_client = self.blob_service_client.get_container_client(
-            self.container_name
-        )
-        
-        blobs = []
-        for blob in container_client.list_blobs(name_starts_with=folder_path):
-            blobs.append(blob.name)
-        
-        return blobs
-    
-    def delete_blob(self, blob_name: str) -> bool:
-        """
-        Delete a blob from storage
-        
-        Args:
-            blob_name: Name of the blob to delete
-            
-        Returns:
-            bool: True if deleted successfully
+            str: URL of the blob
         """
         blob_client = self.blob_service_client.get_blob_client(
             container=self.container_name,
             blob=blob_name
         )
-        
-        blob_client.delete_blob()
-        return True
-
-
-def upload_pdf_to_blob(
-    connection_string: str,
-    folder_name: str,
-    pdf_file,
-    container_name: str = "uploads"
-) -> Tuple[bool, dict]:
-    """
-    Standalone function to upload PDF to Azure Blob Storage
+        return blob_client.url
     
-    Args:
-        connection_string: Azure Storage connection string
-        folder_name: Folder name to create/use
-        pdf_file: PDF file object from Streamlit file uploader
-        container_name: Container name (default: 'uploads')
+    def get_blob_sas_url(self, blob_name: str, expiry_hours: int = 1) -> str:
+        """
+        Get SAS URL of a blob (for public access without credentials)
         
-    Returns:
-        Tuple: (success: bool, result_dict: dict with details)
-    """
-    try:
-        manager = BlobStorageManager(connection_string, container_name)
-        
-        # Create container if needed
-        container_created = manager.create_container_if_not_exists()
-        
-        # Upload PDF
-        success, folder_path, blob_name = manager.upload_pdf(folder_name, pdf_file)
-        
-        return True, {
-            "success": success,
-            "folder_path": folder_path,
-            "blob_name": blob_name,
-            "file_name": pdf_file.name,
-            "container_name": container_name,
-            "container_created": container_created
-        }
-    except Exception as e:
-        return False, {
-            "error": str(e)
-        }
+        Args:
+            blob_name: Name of the blob
+            expiry_hours: Number of hours the SAS token is valid (default: 1 hour)
+            
+        Returns:
+            str: SAS URL of the blob
+        """
+        try:
+            # Extract account name and key from connection string
+            connection_dict = {}
+            for part in self.connection_string.split(";"):
+                if "=" in part:
+                    key, value = part.split("=", 1)
+                    connection_dict[key] = value
+            
+            account_name = connection_dict.get("AccountName")
+            account_key = connection_dict.get("AccountKey")
+            
+            if not account_name or not account_key:
+                raise Exception("Could not extract account name or key from connection string")
+            
+            # Generate SAS token
+            sas_token = generate_blob_sas(
+                account_name=account_name,
+                container_name=self.container_name,
+                blob_name=blob_name,
+                account_key=account_key,
+                permission=BlobSasPermissions(read=True),
+                expiry=datetime.utcnow() + timedelta(hours=expiry_hours)
+            )
+            
+            # Construct SAS URL
+            blob_client = self.blob_service_client.get_blob_client(
+                container=self.container_name,
+                blob=blob_name
+            )
+            sas_url = f"{blob_client.url}?{sas_token}"
+            
+            return sas_url
+        except Exception as e:
+            raise Exception(f"Failed to generate SAS URL: {str(e)}")
