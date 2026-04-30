@@ -2,9 +2,15 @@ import time
 from datetime import date
 import streamlit as st
 
-from services.invoice_processor import InvoiceProcessor
+from services.invoice.invoice_processor import InvoiceProcessor
 from services.blob_storage_service import BlobStorageService
-from services.validation_service import ValidationService
+from services.invoice.validation_service import ValidationService
+from services.config import AzureConfig
+from services.policy_rag.rag_service import RAGService
+from services.policy_rag.chat_service import ChatService
+from services.policy_rag.search_service import AzureSearchService
+from services.policy_rag.doc_processor import DocumentProcessor
+from services.policy_rag.doc_intelligence_service import DocumentIntelligenceService
 from utils.helpers import display_invoice_card
 from utils.date_helpers import build_travel_session, format_deadline_warning
 
@@ -26,7 +32,9 @@ defaults = {
     "pending_filenames": [],
     "travel_session": None,
     "blob_urls": {},      
-    "dummy_chat_history": [],
+    "chat_history": [],
+    "indexed_documents": [],
+    "current_document": None,
 }
 for key, val in defaults.items():
     if key not in st.session_state:
@@ -50,40 +58,206 @@ def get_blob_service():
         st.warning(f"Blob storage unavailable — invoices will not be archived: {e}")
         return None
 
-processor = get_processor()
-blob_svc  = get_blob_service()
-
-
-# SIDEBAR — Policy Chatbot (DUMMY — RAG integration)
-with st.sidebar:
-    st.header("💬 Policy Assistant")
-    st.caption("Ask anything about the travel expense policy.")
-
-    # Render existing dummy history
-    chat_container = st.container(height=420)
-    with chat_container:
-        for msg in st.session_state.dummy_chat_history:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
-
-    # Accept user input and reply with a static placeholder
-    user_input = st.chat_input("Ask about the policy…")
-    if user_input:
-        # Save and display user message
-        st.session_state.dummy_chat_history.append({"role": "user", "content": user_input})
-        with chat_container:
-            with st.chat_message("user"):
-                st.markdown(user_input)
-
-
-        dummy_reply = (
-            "🔧 The policy assistant is being set up. "
+@st.cache_resource
+def get_rag_services():
+    try:
+        config = AzureConfig()
+        search_service = AzureSearchService(
+            config.search_endpoint,
+            config.search_key,
+            config.search_index_name
         )
+        search_service.create_index()
+        rag_service = RAGService(search_service)
+        chat_service = ChatService(
+            rag_service,
+            azure_endpoint=config.azure_openai_endpoint,
+            azure_key=config.azure_openai_key,
+            api_version=config.azure_openai_api_version,
+            model=config.azure_openai_model
+        )
+        return {
+            "config": config,
+            "search_service": search_service,
+            "rag_service": rag_service,
+            "chat_service": chat_service,
+        }
+    except Exception as e:
+        st.warning(f"RAG services unavailable: {e}")
+        return None
 
-        st.session_state.dummy_chat_history.append({"role": "assistant", "content": dummy_reply})
-        with chat_container:
-            with st.chat_message("assistant"):
-                st.markdown(dummy_reply)
+@st.cache_resource
+def get_policy_blob_service():
+    try:
+        from services.config import AzureConfig
+        config = AzureConfig()
+        from services.blob_storage_service import BlobStorageService
+        blob_svc = BlobStorageService()
+        blob_svc.container_name = "policies"  # Use policies container
+        blob_svc._ensure_container()
+        return blob_svc
+    except Exception as e:
+        st.warning(f"Policy storage unavailable: {e}")
+        return None
+
+@st.cache_resource
+def get_policy_doc_service():
+    try:
+        from services.config import AzureConfig
+        config = AzureConfig()
+        from services.policy_rag.doc_intelligence_service import DocumentIntelligenceService
+        return DocumentIntelligenceService(
+            config.doc_intelligence_endpoint,
+            config.doc_intelligence_key
+        )
+    except Exception as e:
+        st.warning(f"Document Intelligence unavailable: {e}")
+        return None
+
+processor = get_processor()
+blob_svc = get_blob_service()
+rag_services = get_rag_services()
+policy_blob_svc = get_policy_blob_service()
+policy_doc_service = get_policy_doc_service()
+policy_processor = DocumentProcessor(chunk_size=2000, chunk_overlap=300) if rag_services else None
+
+
+# SIDEBAR — Policy Management & Chatbot
+with st.sidebar:
+    st.header("📋 Policy Management")
+    
+    if rag_services and policy_blob_svc and policy_doc_service:
+        # Policy document upload section
+        st.subheader("📤 Upload Policy Document")
+        st.caption("Upload your travel policy PDF for the chatbot to reference")
+        
+        policy_file = st.file_uploader("Choose a policy PDF", type="pdf", key="policy_upload")
+        folder_name = st.text_input("Folder name (optional)", value="policies", key="policy_folder")
+        
+        if policy_file and st.button("Upload & Index Policy", use_container_width=True, key="upload_policy_btn"):
+            try:
+                # Stage 1: Upload to Blob Storage
+                st.info("📤 Stage 1/5: Uploading PDF to Azure Blob Storage...")
+                upload_info = policy_blob_svc.upload_pdf(policy_file, folder_name)
+                st.success("✅ PDF uploaded")
+                
+                # Stage 2: Generate SAS URL
+                st.info("🔐 Stage 2/5: Generating access URL...")
+                sas_url = policy_blob_svc.get_blob_sas_url(upload_info["blob_name"])
+                st.success("✅ Access URL generated")
+                
+                # Stage 3: Extract text with Document Intelligence
+                st.info("📖 Stage 3/5: Extracting text from PDF (this may take 10-30 seconds)...")
+                doc_result = policy_doc_service.analyze_document(sas_url)
+                pages_data = policy_doc_service.extract_text_by_page(doc_result)
+                total_chars = sum(len(p["text"]) for p in pages_data)
+                st.success(f"✅ Text extracted ({total_chars:,} characters across {len(pages_data)} pages)")
+                
+                # Stage 4: Process into chunks
+                st.info("✂️ Stage 4/5: Processing document into chunks...")
+                st.write(f"📊 Document size: {total_chars:,} characters across {len(pages_data)} pages")
+                
+                chunk_start = time.time()
+                all_chunks = []
+                for page_info in pages_data:
+                    page_chunks = policy_processor.chunk_text(
+                        page_info["text"],
+                        policy_file.name,
+                        page_number=page_info["page_number"]
+                    )
+                    all_chunks.extend(page_chunks)
+                
+                chunk_time = time.time() - chunk_start
+                st.write(f"✅ Created {len(all_chunks)} chunks in {chunk_time:.2f}s")
+                st.success("✅ Chunking complete")
+                
+                # Stage 5: Index in Azure AI Search
+                st.info(f"🔍 Stage 5/5: Indexing {len(all_chunks)} chunks in Azure AI Search...")
+                documents = policy_processor.prepare_for_indexing(all_chunks)
+                rag_services["search_service"].index_documents(documents)
+                st.success(f"✅ Indexed {len(documents)} document chunks successfully!")
+                
+                # Update indexed documents
+                st.session_state.indexed_documents = rag_services["search_service"].get_all_sources()
+                st.session_state.current_document = policy_file.name
+                st.rerun()
+                    
+            except Exception as e:
+                st.error(f"❌ Error processing document: {str(e)}")
+        
+        st.markdown("---")
+        
+        # Show indexed documents
+        st.subheader("📚 Indexed Documents")
+        indexed = rag_services["search_service"].get_all_sources()
+        st.session_state.indexed_documents = indexed
+        
+        if indexed:
+            for doc in indexed:
+                st.markdown(f"✅ {doc}")
+        else:
+            st.info("ℹ️ No policy documents indexed yet. Upload one above.")
+        
+        st.markdown("---")
+        
+        # Chat history section
+        st.subheader("💬 Chat History")
+        if st.session_state.chat_history:
+            for msg in st.session_state.chat_history:
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
+            if st.button("🔄 Clear Chat", use_container_width=True):
+                st.session_state.chat_history = []
+                st.rerun()
+        else:
+            st.info("💭 Chat history appears here")
+    else:
+        st.error("❌ Policy services not available. Check your Azure configuration.")
+
+# Policy Chat Input (outside sidebar)
+if rag_services:
+    st.markdown("---")
+    st.subheader("💬 Ask About Travel Policy")
+    
+    # Check if documents are indexed
+    indexed_docs = rag_services["search_service"].get_all_sources()
+    
+    if indexed_docs:
+        # Use a form to capture input
+        with st.form(key="policy_form"):
+            policy_question = st.text_input("Ask a question about company travel policy:", key="policy_input")
+            submitted = st.form_submit_button("Ask", type="primary")
+        
+        if submitted and policy_question:
+            # Add user message
+            st.session_state.chat_history.append({"role": "user", "content": policy_question})
+            
+            # Generate RAG response
+            with st.spinner("🔍 Searching policy documents..."):
+                try:
+                    response = rag_services["chat_service"].chat_with_rag(
+                        user_query=policy_question,
+                        chat_history=st.session_state.chat_history[:-1],
+                        top_k=5
+                    )
+                    assistant_reply = response["answer"]
+                except Exception as e:
+                    assistant_reply = f"⚠️ Error generating response: {str(e)}"
+
+            st.session_state.chat_history.append({"role": "assistant", "content": assistant_reply})
+            
+            # Display response
+            st.success("✅ Answer generated:")
+            st.info(f"**Answer:** {assistant_reply}")
+            
+            if response.get("sources"):
+                with st.expander("📚 View Source Documents"):
+                    for i, source in enumerate(response["sources"], 1):
+                        st.markdown(f"**Source {i}:** {source['source_file']} (Page {source['page_number']})")
+                        st.markdown(f"*Relevance: {source['score']:.2f}*")
+                        st.markdown(f"> {source['content'][:300]}...")
+    else:
+        st.warning("⚠️ No policy documents indexed yet. Please upload a policy PDF in the sidebar first.")
 
 
 

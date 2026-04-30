@@ -1,6 +1,6 @@
 from models.invoice_model import InvoiceData
-from services.azure_document_service import AzureDocumentService
-from services.validation_service import ValidationService
+from .azure_document_service import AzureDocumentService
+from .validation_service import ValidationService
 
 class InvoiceProcessor:
     def __init__(self):
