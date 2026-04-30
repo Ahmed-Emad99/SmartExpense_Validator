@@ -3,3 +3,4 @@ azure-ai-documentintelligence
 azure-core
 python-dotenv
 pydantic
+azure.storage.blob

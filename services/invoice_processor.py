@@ -12,22 +12,24 @@ class InvoiceProcessor:
         Processes a single invoice:
         1. Extracts data using Azure Document Intelligence.
         2. Maps data to the InvoiceData model.
-        3. Validates the extracted data.
+        3. Validates the extracted data (field completeness).
         """
-        # 1. Extract data
+        # 1. Extract
         extracted_dict = self.doc_service.extract_invoice_data(file_bytes)
-        
-        # 2. Map to Model
+
+        # 2. Map to model
         invoice = InvoiceData(
             invoice_id=invoice_id,
             date=extracted_dict.get("date"),
             total_price=extracted_dict.get("total_price"),
+            currency=extracted_dict.get("currency"),
             purchased_items=extracted_dict.get("purchased_items", []),
+            vendor_name=extracted_dict.get("vendor_name"),
             tax_number=extracted_dict.get("tax_number"),
-            raw_text=extracted_dict.get("raw_text")
+            raw_text=extracted_dict.get("raw_text"),
         )
-        
-        # 3. Validate
+
+        # 3. Validate (Layer 1 — field completeness)
         invoice = self.val_service.validate_invoice(invoice, display_id)
-        
+
         return invoice

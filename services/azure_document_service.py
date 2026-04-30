@@ -10,10 +10,10 @@ class AzureDocumentService:
     def __init__(self):
         endpoint = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT")
         key = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_KEY")
-        
+
         if not endpoint or not key:
             raise ValueError("Missing Azure Document Intelligence credentials in .env")
-            
+
         self.client = DocumentIntelligenceClient(
             endpoint=endpoint, credential=AzureKeyCredential(key)
         )
@@ -23,7 +23,6 @@ class AzureDocumentService:
         Extracts invoice information using Azure Document Intelligence 'prebuilt-invoice' model.
         Returns a dictionary with raw extracted values.
         """
-        # Analyze document
         poller = self.client.begin_analyze_document(
             "prebuilt-invoice", AnalyzeDocumentRequest(bytes_source=file_bytes)
         )
@@ -32,13 +31,14 @@ class AzureDocumentService:
         extracted_data = {
             "date": None,
             "total_price": None,
+            "currency": None,
             "purchased_items": [],
+            "vendor_name": None,
             "tax_number": None,
-            "raw_text": result.content
+            "raw_text": result.content,
         }
 
         if result.documents:
-            # We usually only have one document if it's a single invoice image
             doc = result.documents[0]
             fields = doc.fields if doc.fields else {}
 
@@ -46,17 +46,23 @@ class AzureDocumentService:
             if "InvoiceDate" in fields:
                 extracted_data["date"] = fields.get("InvoiceDate").get("valueDate")
 
-            # Extract Total Price
+            # Extract Total Price + Currency
             if "InvoiceTotal" in fields:
-                # ValueCurrency usually contains amount and currency
                 currency_val = fields.get("InvoiceTotal").get("valueCurrency")
-                if currency_val and "amount" in currency_val:
-                    extracted_data["total_price"] = float(currency_val["amount"])
+                if currency_val:
+                    if "amount" in currency_val:
+                        extracted_data["total_price"] = float(currency_val["amount"])
+                    # currencyCode is the ISO code e.g. "USD", "EUR"
+                    if "currencyCode" in currency_val:
+                        extracted_data["currency"] = currency_val["currencyCode"]
                 else:
-                    # fallback to valueNumber if available
                     extracted_data["total_price"] = fields.get("InvoiceTotal").get("valueNumber")
 
-            # Extract Tax Number (TaxId)
+            # Extract Vendor Name
+            if "VendorName" in fields:
+                extracted_data["vendor_name"] = fields.get("VendorName").get("valueString")
+
+            # Extract Tax Number
             if "TaxId" in fields:
                 extracted_data["tax_number"] = fields.get("TaxId").get("valueString")
 
@@ -65,7 +71,6 @@ class AzureDocumentService:
                 items = fields.get("Items").get("valueArray", [])
                 for item in items:
                     item_fields = item.get("valueObject", {})
-                    # Usually "Description" holds the item name
                     if "Description" in item_fields:
                         desc = item_fields.get("Description").get("valueString")
                         if desc:
