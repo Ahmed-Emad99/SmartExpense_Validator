@@ -8,7 +8,9 @@ class InvoiceData(BaseModel):
     invoice_id: str
     date: Optional[str] = None
     total_price: Optional[float] = None
+    currency: Optional[str] = None
     purchased_items: List[str] = []
+    vendor_name: Optional[str] = None
     tax_number: Optional[str] = None
     raw_text: Optional[str] = None
     
