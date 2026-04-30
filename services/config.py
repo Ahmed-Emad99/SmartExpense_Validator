@@ -16,7 +16,7 @@ class AzureConfig:
         
         # Blob Storage
         self.storage_connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
-        self.blob_container_name = "uploads"
+        self.blob_container_name = "invoices"
         
         # Document Intelligence
         self.doc_intelligence_endpoint = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT")
@@ -25,7 +25,7 @@ class AzureConfig:
         # Azure AI Search
         self.search_endpoint = os.getenv("AZURE_SEARCH_ENDPOINT")
         self.search_key = os.getenv("AZURE_SEARCH_KEY")
-        self.search_index_name = "pdf-documents"
+        self.search_index_name = "travel-policy-index"
         
         # Azure OpenAI (GPT-4o)
         self.azure_openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")

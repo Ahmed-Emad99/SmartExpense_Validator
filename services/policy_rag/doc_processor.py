@@ -150,21 +150,9 @@ class DocumentProcessor:
             List[Dict]: Formatted documents ready for indexing
         """
         documents = []
-        
         for chunk in chunks:
-            doc = {
-                "id": chunk.chunk_id,
-                "content": chunk.content,
-                "page_number": chunk.page_number,
-                "source_file": chunk.source_file,
-                "chunk_index": chunk.chunk_index,
-                "created_at": chunk.created_at,
-            }
-            
-            # Add additional metadata if provided
+            doc = chunk.to_dict()
             if additional_metadata:
                 doc.update(additional_metadata)
-            
             documents.append(doc)
-        
         return documents

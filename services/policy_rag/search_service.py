@@ -12,7 +12,6 @@ from azure.search.documents.indexes.models import (
     SearchFieldDataType,
     SimpleField,
     SearchableField,
-    SearchIndex,
 )
 from azure.core.credentials import AzureKeyCredential
 
@@ -58,22 +57,24 @@ class AzureSearchService:
                 SimpleField(name="id", type=SearchFieldDataType.String, key=True),
                 SearchableField(name="content", type=SearchFieldDataType.String, analyzer_name="en.microsoft"),
                 SimpleField(name="page_number", type=SearchFieldDataType.Int32),
-                SimpleField(name="source_file", type=SearchFieldDataType.String, filterable=True, facetable=True),
+                SimpleField(name="source_file", type=SearchFieldDataType.String, filterable=True),
                 SimpleField(name="chunk_index", type=SearchFieldDataType.Int32),
-                SimpleField(name="created_at", type=SearchFieldDataType.String, filterable=True),
+                SimpleField(name="created_at", type=SearchFieldDataType.String),
             ]
             
-            index = SearchIndex(name=self.index_name, fields=fields)
+            index = SearchIndex(
+                name=self.index_name,
+                fields=fields,
+            )
             
             result = self.index_client.create_index(index)
-            print(f"Index '{self.index_name}' created successfully")
+            print(f"Created index '{self.index_name}'")
             return True
-            
         except Exception as e:
             print(f"Error creating index: {str(e)}")
-            raise Exception(f"Failed to create index: {str(e)}")
+            return False
     
-    def index_documents(self, documents: List[Dict]) -> Dict:
+    def index_documents(self, documents: List[Dict]) -> bool:
         """
         Index documents in Azure AI Search
         
@@ -81,95 +82,50 @@ class AzureSearchService:
             documents: List of documents to index
             
         Returns:
-            Dict: Indexing result information
+            bool: True if successful
         """
         try:
             result = self.search_client.upload_documents(documents)
-            
-            successful = sum(1 for r in result if r.succeeded)
-            failed = sum(1 for r in result if not r.succeeded)
-            
-            print(f"Indexed {successful} documents successfully, {failed} failed")
-            
-            return {
-                "total_documents": len(documents),
-                "successful": successful,
-                "failed": failed,
-                "status": "completed"
-            }
+            print(f"Indexed {len(documents)} documents")
+            return True
         except Exception as e:
             raise Exception(f"Failed to index documents: {str(e)}")
-    
-    def delete_documents_by_source(self, source_file: str) -> Dict:
-        """
-        Delete all documents from a specific source file
-        
-        Args:
-            source_file: Name of the source file
-            
-        Returns:
-            Dict: Deletion result information
-        """
-        try:
-            # Search for all documents from this source
-            results = self.search_client.search(
-                search_text="*",
-                filter=f"source_file eq '{source_file}'",
-                select=["id"]
-            )
-            
-            doc_ids = [result["id"] for result in results]
-            
-            if not doc_ids:
-                return {"deleted_count": 0, "status": "no_documents_found"}
-            
-            # Delete documents
-            delete_docs = [{"id": doc_id} for doc_id in doc_ids]
-            result = self.search_client.delete_documents(delete_docs)
-            
-            return {
-                "deleted_count": len(doc_ids),
-                "status": "completed"
-            }
-        except Exception as e:
-            raise Exception(f"Failed to delete documents: {str(e)}")
     
     def keyword_search(self, query: str, top_k: int = 5, 
                       source_file: Optional[str] = None) -> List[Dict]:
         """
-        Perform keyword search on documents
+        Perform keyword search on indexed documents
         
         Args:
             query: Search query
-            top_k: Number of results to return
+            top_k: Number of top results to return
             source_file: Optional filter by source file
             
         Returns:
-            List[Dict]: Search results
+            List[Dict]: Search results with scores
         """
         try:
-            filters = None
+            filter_query = None
             if source_file:
-                filters = f"source_file eq '{source_file}'"
+                filter_query = f"source_file eq '{source_file}'"
             
             results = self.search_client.search(
                 search_text=query,
-                filter=filters,
-                top=top_k,
-                select=["id", "content", "page_number", "source_file", "chunk_index"]
+                filter=filter_query,
+                top=top_k
             )
             
-            search_results = []
+            formatted_results = []
             for result in results:
-                search_results.append({
+                formatted_results.append({
                     "id": result["id"],
                     "content": result["content"],
-                    "page_number": result.get("page_number", 0),
+                    "page_number": result["page_number"],
                     "source_file": result["source_file"],
                     "score": result["@search.score"],
                 })
             
-            return search_results
+            return formatted_results
         except Exception as e:
             raise Exception(f"Search failed: {str(e)}")
     
@@ -183,22 +139,11 @@ class AzureSearchService:
         try:
             results = self.search_client.search(
                 search_text="*",
-                facets=["source_file"],
-                top=0
+                select=["source_file"],
+                top=1000
             )
-            
-            # Extract facets
-            facets = results.get_facets() if hasattr(results, 'get_facets') else {}
-            
-            if "source_file" in facets:
-                sources = [item["value"] for item in facets["source_file"]]
-                return sources
-            
-            # Fallback: search for unique source_file values
-            results = self.search_client.search(search_text="*", select=["source_file"], top=1000)
-            sources = list(set([result["source_file"] for result in results]))
-            return sources
-            
+            sources = list(set([result["source_file"] for result in results if "source_file" in result]))
+            return sorted(sources)
         except Exception as e:
             print(f"Error getting sources: {str(e)}")
             return []
@@ -212,7 +157,7 @@ class AzureSearchService:
         """
         try:
             self.index_client.delete_index(self.index_name)
-            print(f"Index '{self.index_name}' deleted successfully")
+            print(f"Deleted index '{self.index_name}'")
             return True
         except Exception as e:
             print(f"Error deleting index: {str(e)}")

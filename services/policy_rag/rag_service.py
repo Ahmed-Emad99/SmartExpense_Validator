@@ -4,13 +4,12 @@ Handles retrieval-augmented generation operations
 """
 
 from typing import List, Dict, Optional, Tuple
-from search_service import AzureSearchService
 
 
 class RAGService:
     """Service for RAG operations - retrieving relevant documents and preparing context"""
     
-    def __init__(self, search_service: AzureSearchService):
+    def __init__(self, search_service):
         """
         Initialize RAG Service
         
@@ -78,64 +77,12 @@ class RAGService:
         Returns:
             str: System prompt
         """
-        return """You are a helpful assistant that answers questions based on the provided document context. 
-Follow these guidelines:
-1. Answer only based on the information provided in the document context
-2. If the answer is not in the context, say "I couldn't find this information in the provided documents"
-3. Be clear and concise in your responses
-4. Cite which document or page the information comes from when relevant
-5. If multiple sources have relevant information, mention all of them"""
-    
-    def prepare_chat_prompt(self, user_query: str, context: str, chat_history: List[Dict] = None) -> str:
-        """
-        Prepare the full chat prompt with context and history
-        
-        Args:
-            user_query: Current user query
-            context: Retrieved context from documents
-            chat_history: Optional chat history
-            
-        Returns:
-            str: Formatted prompt
-        """
-        prompt_parts = []
-        
-        # Add context
-        prompt_parts.append("DOCUMENT CONTEXT:")
-        prompt_parts.append("-" * 50)
-        prompt_parts.append(context)
-        prompt_parts.append("-" * 50)
-        
-        # Add chat history if available
-        if chat_history and len(chat_history) > 0:
-            prompt_parts.append("\nCONVERSATION HISTORY:")
-            for message in chat_history[-5:]:  # Last 5 messages for context
-                role = message.get("role", "").upper()
-                content = message.get("content", "")
-                prompt_parts.append(f"{role}: {content}")
-        
-        # Add current question
-        prompt_parts.append(f"\nUSER QUESTION: {user_query}")
-        
-        return "\n".join(prompt_parts)
-    
-    def get_source_list(self) -> List[str]:
-        """
-        Get list of all indexed source documents
-        
-        Returns:
-            List[str]: List of source files
-        """
-        return self.search_service.get_all_sources()
-    
-    def reindex_document(self, documents: List[Dict]) -> Dict:
-        """
-        Re-index documents (used for document updates)
-        
-        Args:
-            documents: List of documents to index
-            
-        Returns:
-            Dict: Indexing result
-        """
-        return self.search_service.index_documents(documents)
+        return """You are a helpful corporate travel policy assistant. 
+You have access to the company's comprehensive travel policy documents.
+
+When answering questions:
+1. Reference the relevant policy sections from the retrieved documents
+2. Be clear and concise
+3. If information is not found in the documents, say so explicitly
+4. Provide page references where applicable
+5. Highlight any important restrictions or requirements"""
