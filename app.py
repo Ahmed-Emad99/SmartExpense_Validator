@@ -1,6 +1,7 @@
 import time
 from datetime import date
 import streamlit as st
+import os
 
 from services.invoice.invoice_processor import InvoiceProcessor
 from services.blob_storage_service import BlobStorageService
@@ -11,6 +12,7 @@ from services.policy_rag.chat_service import ChatService
 from services.policy_rag.search_service import AzureSearchService
 from services.policy_rag.doc_processor import DocumentProcessor
 from services.policy_rag.doc_intelligence_service import DocumentIntelligenceService
+from policy_check import pipeline, policy_validation
 from utils.helpers import display_invoice_card
 from utils.date_helpers import build_travel_session, format_deadline_warning
 
@@ -122,10 +124,66 @@ policy_doc_service = get_policy_doc_service()
 policy_processor = DocumentProcessor(chunk_size=2000, chunk_overlap=300) if rag_services else None
 
 
+# Function to run policy pipeline once
+def run_policy_pipeline():
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    policy_doc_path = os.path.join(current_dir, "docs", "Comprehensive Corporate Travel.pdf")
+    
+    
+    if not os.path.exists(policy_doc_path):
+        print("--> File is not exist")
+        return None
+    
+    try:
+        # Load PDF text
+        text = pipeline.load_pdf(policy_doc_path)
+        print (f"---> Loaded {len(text)} characters from policy document")
+    
+        # Chunk the text
+        chunks = pipeline.chunk_text(text, chunk_size=500, overlap=100)
+        print(f"--->Created {len(chunks)} chunks")
+
+        # Embed chunks
+        embedded_chunks = pipeline.embed_chunks(chunks)
+        print(f"-->Embedded {len(embedded_chunks)} chunks")
+    
+        # Create index if needed
+        pipeline.create_index()
+        print("--> index created")
+    
+        # Store in Azure Search
+        pipeline.store_chunks(embedded_chunks)
+        
+        print("---> ✅ Policy pipeline completed successfully!")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error running policy pipeline: {str(e)}")
+        return None
+
+
+# Function to validate invoice against policy
+def validate_invoice_policy(invoice_data):
+    """
+    Validate an invoice against the policy using policy_validation module.
+    Returns the invoice with updated is_valid and validation_message if policy is invalid.
+    """
+    try:
+        # Run policy validation
+        validated_invoice = policy_validation.validate_against_policy(invoice_data)
+        return validated_invoice
+    except Exception as e:
+        print(f"⚠️ Policy validation error: {str(e)}")
+        return invoice_data
+
+
 # SIDEBAR — Policy Management & Chatbot
 with st.sidebar:
-    st.header("📋 Policy Management")
     
+    st.markdown("---")
+    if "run_policy_pipeline" not in st.session_state:
+        st.session_state.run_policy_pipeline = run_policy_pipeline()
+
     if rag_services and policy_blob_svc and policy_doc_service:
         # Policy document upload section
         st.subheader("📤 Upload Policy Document")
@@ -135,6 +193,7 @@ with st.sidebar:
         folder_name = st.text_input("Folder name (optional)", value="policies", key="policy_folder")
         
         if policy_file and st.button("Upload & Index Policy", use_container_width=True, key="upload_policy_btn"):
+            
             try:
                 # Stage 1: Upload to Blob Storage
                 st.info("📤 Stage 1/5: Uploading PDF to Azure Blob Storage...")
@@ -354,6 +413,18 @@ elif st.session_state.step == "processing":
                     existing_invoices=list(st.session_state.invoices.values()),
                 )
 
+                # Layer 3: Policy validation (only if invoice is still valid from previous layers)
+                if invoice_data.is_valid:
+                    status_text.text(f"Validating {display_id} against policy...")
+                    invoice_data = validate_invoice_policy(invoice_data)
+                    if invoice_data.is_valid:
+                        st.success(f"✅ {display_id} passed policy validation")
+                    else:
+                        st.error(f"❌ {display_id} failed policy validation")
+                        # Show the policy violation details
+                        with st.expander(f"View Policy Details: {display_id}"):
+                            st.markdown(invoice_data.validation_message)
+
                 st.session_state.invoices[invoice_id] = invoice_data
 
                 # Only archive invoices that passed ALL validation layers
@@ -471,6 +542,46 @@ elif st.session_state.step == "review":
                         except Exception as e:
                             st.error(f"Error processing replacement: {e}")
 
+    st.markdown("---")
+    
+    # Policy Validation Results Section
+    st.subheader("📋 Policy Validation Results")
+    
+    policy_valid_count = 0
+    policy_invalid_count = 0
+    policy_inconclusive_count = 0
+    
+    for inv_id, inv_data in st.session_state.invoices.items():
+        display_id = f"Invoice {inv_id.split('_')[1]}"
+        
+        # Check if invoice has policy validation message (contains ❌ or ⚠️ or policy)
+        if inv_data.validation_message and ("❌" in inv_data.validation_message or "policy" in inv_data.validation_message.lower() or "⚠️" in inv_data.validation_message):
+            if "❌" in inv_data.validation_message:
+                policy_invalid_count += 1
+                with st.expander(f"❌ Policy Violation: {display_id}"):
+                    st.markdown(f"**Invoice ID:** {display_id}")
+                    st.markdown(f"**Vendor:** {inv_data.vendor_name or 'N/A'}")
+                    st.markdown(f"**Amount:** {inv_data.total_price} {inv_data.currency or ''}")
+                    st.markdown("---")
+                    st.markdown(inv_data.validation_message)
+            elif "⚠️" in inv_data.validation_message:
+                policy_inconclusive_count += 1
+                with st.expander(f"⚠️ Policy Inconclusive: {display_id}"):
+                    st.markdown(inv_data.validation_message)
+        elif inv_data.is_valid:
+            policy_valid_count += 1
+    
+    # Display summary
+    if policy_invalid_count > 0:
+        st.error(f"❌ {policy_invalid_count} invoice(s) failed policy validation")
+    if policy_inconclusive_count > 0:
+        st.warning(f"⚠️ {policy_inconclusive_count} invoice(s) have inconclusive policy checks")
+    if policy_valid_count > 0:
+        st.success(f"✅ {policy_valid_count} invoice(s) passed policy validation")
+    
+    if policy_valid_count == 0 and policy_invalid_count == 0 and policy_inconclusive_count == 0:
+        st.info("ℹ️ No policy validation results yet. Run the policy pipeline first.")
+    
     st.markdown("---")
     col1, col2 = st.columns(2)
     with col1:
