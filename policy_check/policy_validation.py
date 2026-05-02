@@ -6,16 +6,15 @@ from policy_check.Azure_OpenAI_Client import AzureClient
 # Create an instance of AzureClient
 azure_client = AzureClient()
 
-
+# transform invoice values into a question query.
 def build_policy_query(invoice: InvoiceData) -> str:
-    """
-    transform invoice values into a question query.
-    """
+   
     vendor = invoice.vendor_name or "unknown vendor"
     items = ", ".join(invoice.purchased_items) if invoice.purchased_items else "various items"
     amount = f"{invoice.total_price} {invoice.currency}" if invoice.total_price else "unspecified amount"
     tax_number = invoice.tax_number
     date = invoice.date
+    currency = invoice.currency
 
     messages = [
         {
@@ -24,7 +23,7 @@ def build_policy_query(invoice: InvoiceData) -> str:
     multi-faceted search queries for retrieving travel and expense policy rules.
 
     Your queries must:
-    - Cover EVERY compliance dimension present in the invoice (amount thresholds, vendor type, item categories, tax validity, timing)
+    - Cover EVERY compliance dimension present in the invoice (amount, vendor , item categories, tax validity, timing)
     - Use policy-specific terminology (e.g., "per diem", "reimbursable", "approval limit", "receipt requirement")
     - Be structured to maximize retrieval of ALL potentially relevant policy clauses
     - Flag any combination of fields that could trigger multiple policy rules simultaneously"""
@@ -39,6 +38,7 @@ def build_policy_query(invoice: InvoiceData) -> str:
     Total Amount:  {amount}
     Tax Number:    {tax_number}
     Invoice Date:  {date}
+    Currency:     {currency}
     --------------------
 
     Coverage requirements — your query MUST address every applicable dimension:
@@ -73,7 +73,7 @@ def build_validation_prompt(query, chunks):
 
 RULES YOU MUST FOLLOW:
 1. Base your decision EXCLUSIVELY on the provided policy chunks — no external knowledge, no assumptions.
-2. If the policy chunks do not explicitly cover the case, return INSUFFICIENT_INFO — never guess.
+2. If the policy chunks do not explicitly cover the case, return never guess.
 3. If multiple policy rules apply, evaluate ALL of them — a single violation makes the entire expense INVALID.
 4. Quote the exact policy clause that supports your decision.
 5. Never invent, interpolate, or paraphrase policy rules beyond what is written."""
@@ -91,17 +91,18 @@ RULES YOU MUST FOLLOW:
 
 VALIDATION TASK:
 Evaluate the expense against every relevant rule found in the policy chunks above.
-Check ALL of the following dimensions if covered by the policy:
-- Amount vs. spending limits or approval thresholds
-- Vendor eligibility and registration status
-- Item/category reimbursability
-- Payment method compliance
-- Required documentation (receipts, tax numbers, approvals)
-- Date/timing rules (submission window, advance booking, etc.)
+Check ALL of the following dimensions IF covered by the policy:
+1. Is this expense category reimbursable under the policy?
+2. Does the amount comply with per-item or daily limits?
+3. Is the receipt / documentation sufficient?
+4. Is the payment method compliant?
+5. Were any required pre-approvals obtained?
+6. Are there any timing or submission issues?
+7. Any automatic audit flags (weekend spend, missing business purpose, etc.)?
 
 Return your response in EXACTLY this format — no extra text before or after:
 
-Decision: VALID | INVALID | INSUFFICIENT_INFO
+Decision: VALID | INVALID 
 Violated_Rules: <list each violated clause, or "None">
 Policy_Evidence: "<exact quote from the policy chunk that supports your decision>"
 Reason: <2-3 sentence explanation referencing the policy evidence above>

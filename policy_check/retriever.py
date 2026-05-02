@@ -2,6 +2,8 @@ from policy_check.pipeline import embed_text
 from azure.search.documents import SearchClient
 from azure.search.documents.models import VectorizedQuery
 from azure.core.credentials import AzureKeyCredential
+from sentence_transformers import CrossEncoder
+import numpy as np
 from dotenv import load_dotenv
 import os
 
@@ -13,8 +15,24 @@ INDEX_NAME = os.getenv("AZURE_SEARCH_INDEX_NAME")
 credential = AzureKeyCredential(API_KEY)
 
 ###################################################################################################
+reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 
-def retrieve_relevant_chunks(question: str, top_k: int = 5) -> list:
+def rerank(question, chunks):
+    pairs = [(question, chunk["text"]) for chunk in chunks]
+
+    scores = reranker.predict(pairs)
+    scores = 1 / (1 + np.exp(-scores))
+
+    for i, chunk in enumerate(chunks):
+        chunk["rerank_score"] = scores[i]
+
+    
+    chunks = sorted(chunks, key=lambda x: x["rerank_score"], reverse=True)
+
+    return chunks
+###################################################################################################
+
+def retrieve_relevant_chunks(question: str, top_k: int = 20) -> list:
 
     search_client = SearchClient(ENDPOINT, INDEX_NAME, credential)
 
@@ -27,9 +45,12 @@ def retrieve_relevant_chunks(question: str, top_k: int = 5) -> list:
     ) 
 
     results = search_client.search(
-        search_text=question,        # keyword part
-        vector_queries=[vector_query],  # semantic part
-        select=["chunk_id", "text"],
+        search_text=question,
+        vector_queries=[vector_query],
+        query_type="semantic",
+        semantic_configuration_name="default",
+        query_caption="extractive",
+        query_answer="extractive",
         top=top_k
     )
 
@@ -42,5 +63,5 @@ def retrieve_relevant_chunks(question: str, top_k: int = 5) -> list:
             "score"   : result["@search.score"]
         })
 
-    print(f" ✅ Retrieved {len(chunks)} relevant chunks.")
-    return chunks
+    reranked_chunks = rerank(question, chunks)
+    return reranked_chunks[:5]

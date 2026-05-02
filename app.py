@@ -127,7 +127,7 @@ policy_processor = DocumentProcessor(chunk_size=2000, chunk_overlap=300) if rag_
 # Function to run policy pipeline once
 def run_policy_pipeline():
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    policy_doc_path = os.path.join(current_dir, "docs", "Comprehensive Corporate Travel.pdf")
+    policy_doc_path = os.path.join(current_dir, "docs", "Comprehensive Corporate Travel (1).pdf")
     
     
     if not os.path.exists(policy_doc_path):
@@ -136,12 +136,14 @@ def run_policy_pipeline():
     
     try:
         # Load PDF text
-        text = pipeline.load_pdf(policy_doc_path)
+        """text = pipeline.load_pdf(policy_doc_path)
         print (f"---> Loaded {len(text)} characters from policy document")
     
         # Chunk the text
         chunks = pipeline.chunk_text(text, chunk_size=500, overlap=100)
-        print(f"--->Created {len(chunks)} chunks")
+        print(f"--->Created {len(chunks)} chunks")"""
+
+        chunks = pipeline.chunking(policy_doc_path)
 
         # Embed chunks
         embedded_chunks = pipeline.embed_chunks(chunks)

@@ -3,6 +3,8 @@ from openai import AzureOpenAI
 from dotenv import load_dotenv
 import os
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from unstructured.partition.pdf import partition_pdf
+from unstructured.chunking.title import chunk_by_title
 from azure.search.documents import SearchClient
 from azure.search.documents.indexes import SearchIndexClient
 from azure.search.documents.indexes.models import (
@@ -13,7 +15,11 @@ from azure.search.documents.indexes.models import (
     VectorSearch,
     HnswAlgorithmConfiguration,
     VectorSearchProfile,
-    SearchableField
+    SearchableField,
+    SemanticConfiguration,
+    SemanticPrioritizedFields,
+    SemanticField,
+    SemanticSearch
 )
 from azure.core.credentials import AzureKeyCredential
 
@@ -56,16 +62,33 @@ def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 100) -> list:
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=overlap,
-        separators=[ "\n", " ", ""]
+        separators=[ "\n\n","\n", " ", ""],
+        length_function=len,
     )
 
     chunks = splitter.split_text(text)
 
-    print(f"Created {len(chunks)} chunks ")
-    for i, chunk in enumerate(chunks):
-        print(f"Chunk {i}:\n len:{len(chunk)}\n{chunk}\n")
-
     return chunks
+
+def chunking(file_path):
+
+    elements = partition_pdf(file_path, strategy="hi_res")
+
+    
+    chunks = chunk_by_title(
+        elements,
+        max_characters=1500,        # hard max per chunk
+        new_after_n_chars=1000,     # soft preferred size
+        overlap=200,                # overlap on oversized splits
+        overlap_all=False,          # don't overlap between normal chunks
+        multipage_sections=True,    # allow sections to span pages
+        combine_text_under_n_chars=500,  # combine small sections
+    )
+
+    clean_chunks = [chunk.text for chunk in chunks]
+
+    return clean_chunks
+    
 
 ###############################################################################################
 
@@ -96,11 +119,11 @@ def embed_chunks(chunks: list) -> list:
 
 ###############################################################################################
 
-def create_index(embedding_dim: int = 1536):
+def create_index(embedding_dim: int = 3072):
 
     index_client = SearchIndexClient(ENDPOINT, credential)
 
-    # Skip if already exists
+    # Delete if already exists to ensure clean recreation
     existing = [idx.name for idx in index_client.list_indexes()]
     if INDEX_NAME in existing:
         print(f"✅ Index '{INDEX_NAME}' already exists — skipping creation.")
@@ -122,9 +145,21 @@ def create_index(embedding_dim: int = 1536):
                 name="myHnswProfile",
                 algorithm_configuration_name="myHnsw"
             )]
+        ),
+            semantic_search=SemanticSearch(
+            configurations=[
+                SemanticConfiguration(
+                    name="default",
+                    prioritized_fields=SemanticPrioritizedFields(
+                        content_fields=[
+                            SemanticField(field_name="text")
+                        ]
+                    )
+                )
+            ]
         )
     )
-
+    
     index_client.create_index(index)
     print(f"✅ Index '{INDEX_NAME}' created.")
 
