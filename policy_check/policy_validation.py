@@ -36,8 +36,6 @@ def build_policy_query(invoice: InvoiceData) -> str:
     Vendor:        {vendor}
     Line Items:    {items}
     Total Amount:  {amount}
-    Tax Number:    {tax_number}
-    Invoice Date:  {date}
     Currency:     {currency}
     --------------------
 
@@ -45,10 +43,8 @@ def build_policy_query(invoice: InvoiceData) -> str:
     1. AMOUNT    → approval thresholds, spending caps, per-item limits
     2. VENDOR    → vendor category (hotel/airline/restaurant/other), registration status, contract requirements
     3. ITEMS     → item-level eligibility, reimbursability, category-specific rules
-    4. TAX       → VAT/tax number validity, tax reclaim eligibility, documentation requirements
-    5. DATE      → submission deadlines, advance booking rules, blackout periods, fiscal period compliance
-    6. PAYMENT   → allowed payment methods for this expense type and amount
-    7. APPROVAL  → required approver level given the total amount
+    5. PAYMENT   → allowed payment methods for this expense type and amount
+    6. APPROVAL  → required approver level given the total amount
 
     Return ONLY the search query — no explanation, no preamble, no bullet points.
     The query should be a single richly-worded string that maximizes policy document retrieval coverage."""
@@ -73,10 +69,11 @@ def build_validation_prompt(query, chunks):
 
 RULES YOU MUST FOLLOW:
 1. Base your decision EXCLUSIVELY on the provided policy chunks — no external knowledge, no assumptions.
-2. If the policy chunks do not explicitly cover the case, return never guess.
+2. If the policy chunks do not explicitly cover the case, never guess.
 3. If multiple policy rules apply, evaluate ALL of them — a single violation makes the entire expense INVALID.
 4. Quote the exact policy clause that supports your decision.
-5. Never invent, interpolate, or paraphrase policy rules beyond what is written."""
+5. Never invent, interpolate, or paraphrase policy rules beyond what is written.
+6. If there is a componed not mentioned in the policy , skip it """
     },
     {
         "role": "user",
@@ -91,14 +88,7 @@ RULES YOU MUST FOLLOW:
 
 VALIDATION TASK:
 Evaluate the expense against every relevant rule found in the policy chunks above.
-Check ALL of the following dimensions IF covered by the policy:
-1. Is this expense category reimbursable under the policy?
-2. Does the amount comply with per-item or daily limits?
-3. Is the receipt / documentation sufficient?
-4. Is the payment method compliant?
-5. Were any required pre-approvals obtained?
-6. Are there any timing or submission issues?
-7. Any automatic audit flags (weekend spend, missing business purpose, etc.)?
+Check ALL of the dimensions that covered by the policy:
 
 Return your response in EXACTLY this format — no extra text before or after:
 

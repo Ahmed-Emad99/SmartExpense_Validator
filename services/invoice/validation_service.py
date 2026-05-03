@@ -33,6 +33,12 @@ class ValidationService:
         if not invoice.purchased_items:
             missing_fields.append("purchased item")
 
+        """if not invoice.tax_number:
+            missing_fields.append("tax_number")"""
+
+        if not invoice.vendor_name:
+            missing_fields.append("vendor_name")
+
         if not missing_fields:
             invoice.is_valid = True
             invoice.validation_message = f"{display_id} is valid."

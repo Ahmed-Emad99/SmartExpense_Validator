@@ -417,6 +417,7 @@ elif st.session_state.step == "processing":
 
                 # Layer 3: Policy validation (only if invoice is still valid from previous layers)
                 if invoice_data.is_valid:
+                    print("*"*70,"OK")
                     status_text.text(f"Validating {display_id} against policy...")
                     invoice_data = validate_invoice_policy(invoice_data)
                     if invoice_data.is_valid:
